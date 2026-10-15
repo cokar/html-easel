@@ -77,7 +77,7 @@ console.log(`  ✓ 已登录账号：${accountName}`);
 
 step('2/5 创建 R2 桶');
 
-const suggestion = `easel-${randomBytes(3).toString('hex')}`;
+const suggestion = `html-easel-${randomBytes(3).toString('hex')}`;
 console.log(`  建议桶名：${suggestion}（R2 桶名全球唯一，带随机后缀基本不会撞）`);
 let bucketName = (await question(`  桶名（回车用建议值）> `)) || suggestion;
 if (!/^[a-z0-9][a-z0-9-]{2,62}$/.test(bucketName)) {

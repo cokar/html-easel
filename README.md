@@ -59,7 +59,7 @@ www.你的域名            ->  /       对外入口页（项目列表）
 本地跑起来不需要 Cloudflare 账号 —— Miniflare 会在本地模拟 R2。
 
 ```bash
-git clone <你的仓库地址> easel && cd easel
+git clone <你的仓库地址> html-easel && cd html-easel
 npm install                # 安装依赖，并把 fflate 拷入 public/admin/vendor/
 cp .dev.vars.example .dev.vars
 npm run dev                # http://127.0.0.1:8787
@@ -110,7 +110,7 @@ npm run setup
 向导依次做五件事，每步都有确认：
 
 1. 检查 wrangler 登录状态
-2. 创建 R2 桶（建议全局唯一名 `easel-<随机后缀>`，已存在可复用）
+2. 创建 R2 桶（建议全局唯一名 `html-easel-<随机后缀>`，已存在可复用）
 3. 把桶名和你的域名写进 `wrangler.jsonc`（保留注释的精确替换，不用 `--update-config`）
 4. 部署（可跳过，之后 `npm run deploy`）
 5. 引导设置后台口令 `ADMIN_PASSWORD`（交互输入，不进 shell 历史）
@@ -165,7 +165,7 @@ npm run deploy
 | `vars.ROOT_DOMAIN 还是占位值`（preflight） | 第 3 步没跑完 |
 | `缺少 public/admin/vendor/fflate.js`（preflight） | 没跑 `npm install` |
 | `Could not find zone "mydomain.dev"` | 域名不在当前账号下，或 `wrangler whoami` 是另一个账号 |
-| `A worker with the name "html-hosting" already exists` | 账号里已有同名 Worker：删掉它，或改 `wrangler.jsonc` 的 `name` |
+| `A worker with the name "html-easel" already exists` | 账号里已有同名 Worker：删掉它，或改 `wrangler.jsonc` 的 `name` |
 | www 打开 404 | DNS 通配记录没加或没开橙云 |
 | 项目页证书错误 | 通配证书还在签发（几分钟，最长 24 小时）；或子域名超过一层 |
 | 后台提示"服务端未设置 ADMIN_PASSWORD" | 口令 secret 没设，跑 `npx wrangler secret put ADMIN_PASSWORD` |

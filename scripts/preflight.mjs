@@ -41,7 +41,7 @@ if (!rootDomain || rootDomain === 'example.com') {
 
 if (!bucket) {
   problems.push('wrangler.jsonc 里缺少 r2_buckets[0].bucket_name。');
-} else if (bucket === 'html-hosting') {
+} else if (bucket === 'html-easel') {
   // R2 桶名全球唯一，这里只是提醒，不算硬错误。
   notes.push(
     `R2 桶名仍是默认的 "${bucket}"。R2 桶名在全球范围内唯一，` +

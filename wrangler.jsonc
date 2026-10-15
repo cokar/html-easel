@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "html-hosting",
+  "name": "html-easel",
   "main": "src/index.js",
   "compatibility_date": "2025-09-01",
 
@@ -18,12 +18,12 @@
   },
 
   // 解压后的文件按 "<项目名>/<路径>" 存进这个桶；元数据也在这个桶里（__sites.json / __config.json）。
-  // 注意：R2 桶名在全球范围内唯一，如果 "html-hosting" 被占用请换一个名字并同步修改这里。
+  // 注意：R2 桶名在全球范围内唯一，如果 "html-easel" 被占用请换一个名字并同步修改这里。
   // 也可以直接跑 `npm run setup`，向导会自动建桶并把名字写到这里。
   "r2_buckets": [
     {
       "binding": "BUCKET",
-      "bucket_name": "html-hosting"
+      "bucket_name": "html-easel"
     }
   ],
 
