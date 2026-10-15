@@ -1,6 +1,13 @@
-// 单管理员口令 + HMAC 签名会话 Cookie（无状态，不需要数据库）。
-// AUTH_SECRET 是 Worker Secret，泄露等同于泄露后台，请用长随机串：
-//   npx wrangler secret put AUTH_SECRET
+// 单管理员口令 + HMAC 签名会话 Cookie（无状态）。
+//
+// 签名密钥的来源优先级：
+//   1. Worker Secret AUTH_SECRET（用 `npx wrangler secret put AUTH_SECRET` 显式设置时）
+//   2. R2 里自举的密钥（首次用到时自动生成并写进 __config.json，之后一直复用）
+// 这样部署时只需要设一个 ADMIN_PASSWORD，AUTH_SECRET 可以完全不管。
+// 两个并发的"首次请求"可能各自生成一次，last-write-wins，
+// 最多作废一个刚签发的会话 —— 单管理员场景可忽略。
+
+import { getOrCreateAuthSecret } from './sites.js';
 
 export const SESSION_COOKIE = 'hh_session';
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -8,12 +15,12 @@ export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const encoder = new TextEncoder();
 const VERSION = 'v1';
 
-function requireSecret(env) {
-  const secret = env.AUTH_SECRET;
-  if (!secret || String(secret).length < 16) {
-    throw new Error('AUTH_SECRET 未设置或过短：请执行 npx wrangler secret put AUTH_SECRET');
+async function authSecret(env) {
+  const fromSecret = env.AUTH_SECRET;
+  if (typeof fromSecret === 'string' && fromSecret.length >= 16) {
+    return fromSecret;
   }
-  return String(secret);
+  return getOrCreateAuthSecret(env);
 }
 
 async function importKey(secret, usages) {
@@ -40,11 +47,17 @@ function fromBase64Url(text) {
   return out;
 }
 
-/** 用 AUTH_SECRET 派生两个等长摘要再比较，避免比较过程泄露口令长度。 */
+/** 用密钥派生两个等长摘要再比较，避免比较过程泄露口令长度。 */
 export async function verifyPassword(env, candidate) {
-  const secret = requireSecret(env);
   const expected = env.ADMIN_PASSWORD;
   if (!expected) return false;
+
+  let secret;
+  try {
+    secret = await authSecret(env);
+  } catch {
+    return false; // R2 不可用时一律当作验证失败，不 fail-open
+  }
 
   const key = await importKey(`${secret}:password`, ['sign']);
   const [a, b] = await Promise.all([
@@ -59,7 +72,7 @@ export async function verifyPassword(env, candidate) {
 }
 
 export async function issueSession(env, ttlSeconds = SESSION_TTL_SECONDS) {
-  const secret = requireSecret(env);
+  const secret = await authSecret(env);
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
   const payload = `${VERSION}.${exp}`;
   const key = await importKey(secret, ['sign']);
@@ -69,12 +82,6 @@ export async function issueSession(env, ttlSeconds = SESSION_TTL_SECONDS) {
 
 export async function verifySession(env, token) {
   if (!token) return false;
-  let secret;
-  try {
-    secret = requireSecret(env);
-  } catch {
-    return false; // 配置缺失时一律当作未登录，不 fail-open
-  }
 
   const dot = token.lastIndexOf('.');
   if (dot < 0) return false;
@@ -89,6 +96,13 @@ export async function verifySession(env, token) {
   let signature;
   try {
     signature = fromBase64Url(sigPart);
+  } catch {
+    return false;
+  }
+
+  let secret;
+  try {
+    secret = await authSecret(env);
   } catch {
     return false;
   }
@@ -110,6 +124,7 @@ export function parseCookies(header) {
 }
 
 export function sessionCookie(token, maxAge) {
+  // Secure 在 http://localhost 下也有效：浏览器把 localhost 视为安全上下文
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 

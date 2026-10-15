@@ -3,14 +3,15 @@
 // 缓存分两层，各自解决一个问题：
 //   浏览器缓存  Cache-Control: max-age（HTML 60 秒 / 其他资源 10 分钟），
 //               没有内容哈希，只能靠短 TTL 让重新部署后的内容自愈。
-//   边缘缓存    Cache API，缓存键里带 deploy_id。
+//   边缘缓存    Cache API，缓存键里带 deployId。
 //               Cache API 的 delete 只能清掉当前数据中心的副本，全球立即失效做不到，
-//               但换键可以：重新部署后 deploy_id 变了，旧键再也不会被读到，
+//               但换键可以：重新部署后 deployId 变了，旧键再也不会被读到，
 //               等效于一次全局失效，也不会出现新旧文件混着返回。
 // 调试时给 URL 加 ?fresh=1 可同时绕过这两层。
 
-import { safePath, escapeHtml } from './util.js';
+import { safePath, escapeHtml, adminUrlFor } from './util.js';
 import { contentTypeFor, cacheControlFor } from './mime.js';
+import { loadSites } from './sites.js';
 
 const MAX_CACHEABLE_BYTES = 100 * 1024 * 1024;
 
@@ -20,16 +21,16 @@ export async function serveProject(request, env, ctx, projectId) {
     return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
   }
 
-  const row = await env.DB.prepare(
-    'SELECT id, entry, status, deploy_id FROM projects WHERE id = ?'
-  ).bind(projectId).first();
+  const sites = await loadSites(env);
+  const row = sites.projects?.[projectId];
 
   if (!row) {
     return infoPage(
       404,
       '项目不存在',
       `没有名为 <code>${escapeHtml(projectId)}</code> 的项目。`,
-      env
+      env,
+      request
     );
   }
   if (row.status !== 'ready') {
@@ -38,6 +39,7 @@ export async function serveProject(request, env, ctx, projectId) {
       '正在部署',
       `项目 <code>${escapeHtml(projectId)}</code> 正在上传文件，请稍后刷新。`,
       env,
+      request,
       { 'Retry-After': '10' }
     );
   }
@@ -45,11 +47,10 @@ export async function serveProject(request, env, ctx, projectId) {
   const url = new URL(request.url);
   const bypassCache = url.searchParams.has('fresh');
 
-  // 缓存键里带上 deploy_id：Cache API 的 delete 只能清掉当前数据中心的副本，
-  // 靠版本号换键就等效于「一次全局失效」——重新部署后旧键再也不会被读到，
+  // 缓存键里带上 deployId：换键等效于「全局失效」——重新部署后旧键再也不会被读到，
   // 不需要等 TTL 过期，也不会出现新旧文件混着返回的情况。
   const cacheUrl = new URL(url.toString());
-  cacheUrl.searchParams.set('__v', String(row.deploy_id));
+  cacheUrl.searchParams.set('__v', String(row.deployId));
   const cache = caches.default;
   const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
 
@@ -66,7 +67,7 @@ export async function serveProject(request, env, ctx, projectId) {
 
   const candidates = resolveCandidates(url.pathname, row.entry);
   if (!candidates) {
-    return infoPage(400, '路径非法', '请求路径中包含非法片段。', env);
+    return infoPage(400, '路径非法', '请求路径中包含非法片段。', env, request);
   }
 
   let object = null;
@@ -96,7 +97,8 @@ export async function serveProject(request, env, ctx, projectId) {
       404,
       '页面不存在',
       `<code>${escapeHtml(url.pathname)}</code> 在项目 <code>${escapeHtml(projectId)}</code> 中找不到。`,
-      env
+      env,
+      request
     );
   }
 
@@ -116,16 +118,27 @@ export async function serveProject(request, env, ctx, projectId) {
   return response;
 }
 
-/** 管理后台界面由 Worker 自己托管（Workers Static Assets），不需要 Cloudflare Pages。 */
+/**
+ * 管理后台界面由 Worker 自己托管（Workers Static Assets），不需要 Cloudflare Pages。
+ * 静态文件位于 public/admin/，URL 路径 /admin/* 与之一一对应；
+ * /admin（无斜杠）先 308 到 /admin/，保证后台页面里的相对引用能正确解析。
+ */
 export async function serveAdmin(request, env) {
   if (!env.ASSETS) {
     return infoPage(
       500,
       '静态资源未绑定',
       'wrangler.jsonc 里缺少 assets.binding 配置，管理后台无法加载。',
-      env
+      env,
+      request
     );
   }
+
+  const url = new URL(request.url);
+  if (url.pathname === '/admin') {
+    return Response.redirect(`${url.origin}/admin/`, 308);
+  }
+
   const origin = await env.ASSETS.fetch(request);
   const response = new Response(origin.body, origin);
   response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -202,9 +215,8 @@ function withHeader(response, name, value) {
   return copy;
 }
 
-function infoPage(status, title, message, env, extraHeaders = {}) {
-  const root = env?.ROOT_DOMAIN || '';
-  const admin = root ? `https://${env.ADMIN_SUBDOMAIN || 'admin'}.${root}/` : '';
+function infoPage(status, title, message, env, request = null, extraHeaders = {}) {
+  const admin = request ? adminUrlFor(request, env) : '';
   const body = `<!doctype html>
 <html lang="zh-CN">
 <head>

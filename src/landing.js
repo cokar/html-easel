@@ -9,6 +9,7 @@
 // 而缓存键要包含列表摘要才能正确失效，那还不如每次直接渲染来得简单可靠。
 
 import { escapeHtml } from './util.js';
+import { loadSites, sitesToList } from './sites.js';
 
 const MAX_PROJECTS = 200;
 
@@ -19,28 +20,25 @@ export async function serveLanding(request, env, ctx) {
   }
 
   let projects = [];
-  let dbError = null;
+  let storeError = null;
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, title, file_count, total_bytes, created_at, updated_at
-         FROM projects
-        WHERE status = 'ready'
-        ORDER BY created_at DESC
-        LIMIT ?`
-    ).bind(MAX_PROJECTS).all();
-    projects = (results || []).map((row) => ({
-      id: row.id,
-      title: row.title || row.id,
-      fileCount: Number(row.file_count) || 0,
-      totalBytes: Number(row.total_bytes) || 0,
-      createdAt: Number(row.created_at) || 0,
-    }));
+    const sites = await loadSites(env);
+    projects = sitesToList(sites)
+      .filter((row) => row.status === 'ready')
+      .slice(0, MAX_PROJECTS)
+      .map((row) => ({
+        id: row.id,
+        title: row.title || row.id,
+        fileCount: Number(row.fileCount) || 0,
+        totalBytes: Number(row.totalBytes) || 0,
+        createdAt: Number(row.createdAt) || 0,
+      }));
   } catch (err) {
-    // 首次部署还没建表时，入口页给一个空状态比直接 500 好得多
-    dbError = err?.message || String(err);
+    // 存储暂时读不到时，入口页给一个空状态比直接 500 好得多
+    storeError = err?.message || String(err);
   }
 
-  const html = renderPage(env, request, projects, dbError);
+  const html = renderPage(env, request, projects, storeError);
 
   return new Response(method === 'HEAD' ? null : html, {
     status: 200,
@@ -61,11 +59,10 @@ function siteUrl(request, env, hostPrefix) {
   return `${url.protocol}//${host}${port}/`;
 }
 
-function renderPage(env, request, projects, dbError) {
+function renderPage(env, request, projects, storeError) {
   const title = env.SITE_TITLE || '我的网页收藏';
   const description =
     env.SITE_DESCRIPTION || '这里托管着我收集的静态页面，点开任意一个都能直接浏览。';
-  const adminUrl = siteUrl(request, env, env.ADMIN_SUBDOMAIN || 'admin');
 
   const totalFiles = projects.reduce((sum, p) => sum + p.fileCount, 0);
   const totalBytes = projects.reduce((sum, p) => sum + p.totalBytes, 0);
@@ -93,7 +90,7 @@ function renderPage(env, request, projects, dbError) {
     <span class="brand-mark" aria-hidden="true"></span>
     <span class="brand-name">${escapeHtml(title)}</span>
   </a>
-  <a class="admin-link" href="${escapeHtml(adminUrl)}">
+  <a class="admin-link" href="/admin">
     <span class="dot" aria-hidden="true"></span>
     管理后台
     <span class="arrow" aria-hidden="true">&#8594;</span>
@@ -123,7 +120,7 @@ function renderPage(env, request, projects, dbError) {
     </div>
   </section>
 
-  ${dbError ? renderNotice(dbError) : ''}
+  ${storeError ? renderNotice(storeError) : ''}
 
   ${
     projects.length
@@ -143,8 +140,8 @@ ${projects.map((p, i) => renderCard(p, request, env, i)).join('\n')}
       : `<section class="empty">
     <div class="empty-mark" aria-hidden="true"></div>
     <h2>还没有托管任何页面</h2>
-    <p>${dbError ? '数据库里还没有数据表，先按 README 执行一次建表。' : '从管理后台上传一个 ZIP 或单个 HTML 文件，它就会出现在这里。'}</p>
-    <a class="button" href="${escapeHtml(adminUrl)}">前往管理后台上传</a>
+    <p>${storeError ? '存储暂时读不到，稍后刷新重试。' : '从管理后台上传一个 ZIP 或单个 HTML 文件，它就会出现在这里。'}</p>
+    <a class="button" href="/admin">前往管理后台上传</a>
   </section>`
   }
 </main>
@@ -152,7 +149,7 @@ ${projects.map((p, i) => renderCard(p, request, env, i)).join('\n')}
 <footer>
   <span>由 Cloudflare Workers + R2 驱动</span>
   <span class="sep" aria-hidden="true">·</span>
-  <a href="${escapeHtml(adminUrl)}">管理后台</a>
+  <a href="/admin">管理后台</a>
 </footer>
 
 <script>${SCRIPT}</script>

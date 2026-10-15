@@ -2,7 +2,7 @@ node_modules/
 .wrangler/
 .dev.vars
 .zcode/
-public/vendor/fflate.js
+public/admin/vendor/fflate.js
 wrangler.deploy.jsonc
 *.log
 .DS_Store

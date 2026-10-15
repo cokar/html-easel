@@ -8,11 +8,10 @@
     "vendor": "node scripts/vendor.mjs",
     "dev": "wrangler dev",
     "config": "node scripts/build-config.mjs",
+    "setup": "node scripts/setup.mjs",
     "deploy": "node scripts/preflight.mjs && node scripts/build-config.mjs && wrangler deploy -c wrangler.deploy.jsonc",
     "preflight": "node scripts/preflight.mjs",
     "smoke": "node scripts/smoke-test.mjs",
-    "db:local": "wrangler d1 execute html-hosting --local --file=schema.sql -y",
-    "db:remote": "wrangler d1 execute html-hosting --remote --file=schema.sql -y",
     "postinstall": "node scripts/vendor.mjs"
   },
   "dependencies": {

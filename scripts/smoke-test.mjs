@@ -1,9 +1,11 @@
 // 本地端到端冒烟测试。需要先启动 `npm run dev`（默认 127.0.0.1:8787）。
 //
-//   node scripts/smoke-test.mjs [--port 8787] [--password test-password-123]
+//   node scripts/smoke-test.mjs [--port 8787] [--password dev-password-change-me]
 //
-// 覆盖：登录鉴权 -> 项目名校验 -> begin -> 分片上传（含路径穿越与垃圾文件）-> finalize
-//       -> 子域名分发（入口、静态资源、无扩展名回退、404、ETag 304）-> 覆盖部署清理残留 -> 删除。
+// 覆盖：登录鉴权 → 项目名校验 → begin → 分片上传（含路径穿越与垃圾文件）→ finalize
+//       → 子域名分发（入口、静态资源、无扩展名回退、404、ETag 304、项目自有 /admin 路径不被劫持）
+//       → 对外入口页（含 /admin 后台路径）→ 覆盖部署清理残留 → 删除。
+// 元数据已收敛进 R2（__sites.json），测试只走 HTTP，不直接碰存储。
 
 import http from 'node:http';
 import { zipSync, strToU8 } from 'fflate';
@@ -15,8 +17,7 @@ const opt = (name, fallback) => {
 };
 
 const PORT = Number(opt('port', '8787'));
-const PASSWORD = opt('password', 'test-password-123');
-const ORIGIN = `http://127.0.0.1:${PORT}`;
+const PASSWORD = opt('password', 'dev-password-change-me');
 
 let passed = 0;
 const failures = [];
@@ -96,28 +97,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function makeTestZip() {  return zipSync({
-    'site/index.html': strToU8(
-      '<!doctype html><html><head><link rel="stylesheet" href="assets/app.css"></head>' +
-        '<body><h1>冒烟测试</h1></body></html>'
-    ),
-    'site/assets/app.css': strToU8('h1{color:#639}'),
-    'site/about.html': strToU8('<h1>About</h1>'),
-    'site/__MACOSX/._index.html': strToU8('junk'),
-    'site/.DS_Store': strToU8('junk'),
-    'site/../../../etc/evil.txt': strToU8('traversal'),
-  });
-}
-
 // ------------------------------------------------------------------ 用例
 
-console.log(`\n冒烟测试 -> ${ORIGIN}\n`);
+console.log(`\n冒烟测试 -> http://127.0.0.1:${PORT}\n`);
 
-console.log('1. 会话与鉴权');
+console.log('0. 登录并清理上次运行的残留');
+{
+  // 清理需要鉴权，所以先登录（登录断言仍留在第 1 节的语境里，这里只拿 cookie）
+  const login = await api('POST', '/api/login', { json: { password: PASSWORD } });
+  globalThis.cookie = (login.headers['set-cookie']?.[0] || '').split(';')[0];
+  check('登录成功（拿到会话）', login.status === 200 && globalThis.cookie, `status=${login.status}`);
+
+  const cleanup = await api('DELETE', '/api/projects/smoke-site', { cookie: globalThis.cookie });
+  check('起始状态干净', cleanup.status === 200, `status=${cleanup.status}`);
+  await sleep(200); // 等边缘缓存里上一个版本的键自然失联
+}
+
+console.log('\n1. 会话与鉴权');
 {
   const anon = await api('GET', '/api/session');
   check('未登录时 /api/session 返回 authenticated=false', anon.data?.authenticated === false);
-  check('后端已配置密钥', anon.data?.configured === true, JSON.stringify(anon.data));
+  check('后端已配置口令', anon.data?.configured === true, JSON.stringify(anon.data));
 
   const guarded = await api('GET', '/api/projects');
   check('未登录访问 /api/projects 被拒（401）', guarded.status === 401, `got ${guarded.status}`);
@@ -125,26 +125,24 @@ console.log('1. 会话与鉴权');
   const wrong = await api('POST', '/api/login', { json: { password: 'nope' } });
   check('错误口令返回 401', wrong.status === 401, `got ${wrong.status}`);
 
+  // .dev.vars 不再设置 AUTH_SECRET：走 R2 自举路径
   const login = await api('POST', '/api/login', { json: { password: PASSWORD } });
-  check('正确口令登录成功', login.status === 200 && login.data?.ok === true, JSON.stringify(login.data));
+  check('正确口令登录成功（密钥自举）', login.status === 200 && login.data?.ok === true, JSON.stringify(login.data));
   const setCookie = login.headers['set-cookie']?.[0] || '';
   check('下发了 HttpOnly 会话 Cookie', /hh_session=/.test(setCookie) && /HttpOnly/i.test(setCookie));
   globalThis.cookie = setCookie.split(';')[0];
+
+  // 自举出的密钥必须稳定：第二次会话校验能通过
+  const relist = await api('GET', '/api/projects', { cookie: globalThis.cookie });
+  check('自举密钥稳定（会话持续有效）', relist.status === 200, `status=${relist.status}`);
 }
 
 const auth = () => ({ cookie: globalThis.cookie });
 
-console.log('\n0. 清理上次运行的残留');
-{
-  const cleanup = await api('DELETE', '/api/projects/smoke-site', auth());
-  check('起始状态干净', cleanup.status === 200, `status=${cleanup.status}`);
-  await sleep(300); // 等边缘缓存里上一个版本的键自然失联
-}
-
 console.log('\n2. 项目名校验');
 {
-  const reserved = await api('POST', '/api/projects/check', { json: { id: 'admin' }, ...auth() });
-  check('保留名 admin 被拒绝', reserved.data?.valid === false, JSON.stringify(reserved.data));
+  const reserved = await api('POST', '/api/projects/check', { json: { id: 'www' }, ...auth() });
+  check('保留名 www 被拒绝', reserved.data?.valid === false, JSON.stringify(reserved.data));
 
   const bad = await api('POST', '/api/projects/check', { json: { id: 'Bad_Name' }, ...auth() });
   check('非法字符被拒绝', bad.data?.valid === false);
@@ -157,16 +155,21 @@ console.log('\n3. 上传部署');
 let deployId;
 {
   const begin = await api('POST', '/api/projects/smoke-site/begin', {
-    json: { title: '冒烟测试站点', sourceName: 'site.zip', fileCount: 3, totalBytes: 200 },
+    json: { title: '冒烟测试站点', sourceName: 'site.zip', fileCount: 4, totalBytes: 200 },
     ...auth(),
   });
   check('begin 成功', begin.data?.ok === true, JSON.stringify(begin.data));
   deployId = begin.data?.deployId;
 
-  const zip = makeTestZip();
+  const zip = zipSync({
+    'index.html': strToU8('<h1>unused</h1>'),
+    'assets/app.css': strToU8('h1{color:#639}'),
+    'about.html': strToU8('<h1>About</h1>'),
+    '__MACOSX/._index.html': strToU8('junk'),
+    '../../../etc/evil.txt': strToU8('traversal'),
+  });
   console.log(`     （测试用 ZIP ${zip.length} 字节）`);
 
-  // 路径穿越必须被拒
   const traversal = await api('POST', '/api/projects/smoke-site/files', {
     form: buildMultipart(deployId, [{ path: '../../evil.txt', bytes: strToU8('x') }]),
     ...auth(),
@@ -184,19 +187,21 @@ let deployId;
       { path: 'index.html', bytes: strToU8('<!doctype html><h1>冒烟测试</h1>') },
       { path: 'assets/app.css', bytes: strToU8('h1{color:#639}') },
       { path: 'about.html', bytes: strToU8('<h1>About</h1>') },
+      // 项目自己的 /admin 路径 —— 不能被后台界面劫持
+      { path: 'admin/panel.html', bytes: strToU8('<h1>project admin page</h1>') },
     ]),
     ...auth(),
   });
-  check('分片上传成功', upload.data?.ok === true && upload.data?.written === 3, JSON.stringify(upload.data));
+  check('分片上传成功', upload.data?.ok === true && upload.data?.written === 4, JSON.stringify(upload.data));
 
   const badEntry = await api('POST', '/api/projects/smoke-site/finalize', {
-    json: { deploy: deployId, entry: 'nope.html', fileCount: 3, totalBytes: 100 },
+    json: { deploy: deployId, entry: 'nope.html', fileCount: 4, totalBytes: 100 },
     ...auth(),
   });
   check('入口文件不存在时 finalize 失败', badEntry.status === 400);
 
   const finalize = await api('POST', '/api/projects/smoke-site/finalize', {
-    json: { deploy: deployId, entry: 'index.html', fileCount: 3, totalBytes: 100 },
+    json: { deploy: deployId, entry: 'index.html', fileCount: 4, totalBytes: 120 },
     ...auth(),
   });
   check('finalize 成功', finalize.data?.ok === true, JSON.stringify(finalize.data));
@@ -240,50 +245,65 @@ console.log('\n4. 子域名分发');
     check('ETag 命中返回 304', cached.status === 304, `status=${cached.status}`);
   }
 
+  // 关键回归：项目子域名里的 /admin 路径属于项目内容，不能被后台界面劫持
+  const projectAdmin = await request('GET', '/admin/panel.html', { host });
+  check(
+    '项目自有的 /admin 路径不被劫持',
+    projectAdmin.status === 200 && projectAdmin.body.toString().includes('project admin page'),
+    `status=${projectAdmin.status}`
+  );
+
   const missing = await request('GET', '/nope/not-here', { host });
   check('不存在的路径返回 404 页面', missing.status === 404 && /页面不存在/.test(missing.body.toString()), `status=${missing.status}`);
 
   const unknownProject = await request('GET', '/', { host: 'no-such-project.localhost' });
   check('不存在的项目返回 404 且提示', unknownProject.status === 404 && /项目不存在/.test(unknownProject.body.toString()));
 
-  const reserved = await request('GET', '/', { host: 'www.localhost' });
-  check('www 返回 302', reserved.status === 302, `status=${reserved.status}`);
+  const reserved = await request('GET', '/', { host: 'admin.localhost' });
+  check('admin 子域名已并入路径，现为保留提示页', reserved.status === 404 && /保留子域名/.test(reserved.body.toString()), `status=${reserved.status}`);
 
   const traversal = await request('GET', '/%2e%2e/%2e%2e/etc/passwd', { host });
   check('分发路径穿越被拒', traversal.status === 404 || traversal.status === 400, `status=${traversal.status}`);
 }
 
-console.log('\n5. 对外入口页（根域名）');
+console.log('\n5. 承载主机（www / 本地）：入口页与 /admin 后台');
 {
-  // 本地开发下根域名等价于 localhost / 127.0.0.1
+  for (const host of ['localhost', 'www.localhost', '127.0.0.1']) {
+    const landing = await request('GET', '/', { host });
+    const html = landing.body.toString();
+    check(`${host} 根路径返回入口页`, landing.status === 200 && html.includes('我的网页收藏'), `status=${landing.status}`);
+    check(`${host} 入口页列出项目`, html.includes('smoke-site') && html.includes('冒烟测试站点'));
+    check(`${host} 项目链接指向子域名`, html.includes('smoke-site.localhost'));
+    check(`${host} 后台入口是 /admin 路径`, html.includes('href="/admin"'));
+  }
+
   const landing = await request('GET', '/', { host: 'localhost' });
-  const html = landing.body.toString();
-  check('根域名返回入口页', landing.status === 200 && /text\/html/.test(landing.headers['content-type'] || ''), `status=${landing.status}`);
-  check('渲染了站点标题', html.includes('我的网页收藏'), html.slice(0, 80));
-  check('列出了托管中的项目', html.includes('smoke-site') && html.includes('冒烟测试站点'));
-  check('项目链接指向子域名', html.includes('smoke-site.localhost'));
-  check('带上了统计信息', /个页面/.test(html) && /个文件/.test(html));
-  check('入口页有搜索框', html.includes('id="filter"'));
   check('入口页缓存 60 秒', /max-age=60/.test(landing.headers['cache-control'] || ''), landing.headers['cache-control']);
-
-  const adminLink = html.match(/class="admin-link" href="([^"]+)"/);
-  check('入口页带后台入口链接', adminLink !== null && adminLink[1].includes('admin.localhost'), adminLink?.[1]);
-  check('页脚也有后台入口', (html.match(/admin\.localhost/g) || []).length >= 2);
-
-  // 关键回归：后台子域名不能被入口页顶掉
-  const admin = await request('GET', '/', { host: 'admin.localhost' });
-  const adminHtml = admin.body.toString();
-  check('admin 子域名仍是管理后台', admin.status === 200 && adminHtml.includes('Easel') && adminHtml.includes('loginForm'), `status=${admin.status}`);
-  check('后台不是入口页', !adminHtml.includes('我的网页收藏'));
-
-  const apex = await request('GET', '/', { host: '127.0.0.1' });
-  check('127.0.0.1 也走入口页', apex.status === 200 && apex.body.toString().includes('我的网页收藏'));
+  check('入口页有搜索框', landing.body.toString().includes('id="filter"'));
 
   const head = await request('HEAD', '/', { host: 'localhost' });
   check('入口页支持 HEAD', head.status === 200 && head.body.length === 0, `status=${head.status} len=${head.body.length}`);
 
   const post = await request('POST', '/', { host: 'localhost' });
   check('入口页拒绝 POST', post.status === 405, `status=${post.status}`);
+
+  const stray = await request('GET', '/not-exist', { host: 'localhost' });
+  check('承载主机未知路径返回 404 提示', stray.status === 404 && /未找到/.test(stray.body.toString()), `status=${stray.status}`);
+
+  // /admin → 308 → /admin/ → 后台页面
+  const redirect = await request('GET', '/admin', { host: 'localhost' });
+  check('/admin 308 到 /admin/', redirect.status === 308 && (redirect.headers.location || '').endsWith('/admin/'), `${redirect.status} -> ${redirect.headers.location}`);
+
+  const adminPage = await request('GET', '/admin/', { host: 'localhost' });
+  const adminHtml = adminPage.body.toString();
+  check('/admin/ 返回管理后台', adminPage.status === 200 && adminHtml.includes('Easel') && adminHtml.includes('loginForm'), `status=${adminPage.status}`);
+  check('后台资源用相对路径引用', adminHtml.includes('href="style.css"') && adminHtml.includes('src="app.js"'));
+
+  const adminAsset = await request('GET', '/admin/style.css', { host: 'localhost' });
+  check('后台静态资源可访问', adminAsset.status === 200 && /text\/css/.test(adminAsset.headers['content-type'] || ''), `status=${adminAsset.status}`);
+
+  const adminWorker = await request('GET', '/admin/unzip-worker.js', { host: 'localhost' });
+  check('解压 Worker 脚本可访问', adminWorker.status === 200, `status=${adminWorker.status}`);
 }
 
 console.log('\n6. 覆盖部署与残留清理');
@@ -318,9 +338,9 @@ console.log('\n6. 覆盖部署与残留清理');
     ...auth(),
   });
   check('第二版 finalize 成功', finalize.data?.ok === true);
-  check('清理了上一版的残留文件（2 个）', finalize.data?.purgedStale === 2, `purged=${finalize.data?.purgedStale}`);
+  check('清理了上一版的残留文件（3 个）', finalize.data?.purgedStale === 3, `purged=${finalize.data?.purgedStale}`);
 
-  // 关键回归：重新部署后 deploy_id 变了，缓存键随之改变，
+  // 关键回归：重新部署后 deployId 变了，缓存键随之改变，
   // 所以这里必须立刻拿到新内容（而不是命中上一版的缓存）。
   const updated = await request('GET', '/', { host: 'smoke-site.localhost' });
   check('重新部署后立刻返回新内容', updated.body.toString().includes('第二版'), updated.body.toString().slice(0, 60));
@@ -333,6 +353,7 @@ console.log('\n6. 覆盖部署与残留清理');
 console.log('\n7. 删除项目');
 {
   const removed = await api('DELETE', '/api/projects/smoke-site', auth());
+  // 第二版部署时已清掉 3 个旧文件，桶里只剩第二版的 index.html
   check('删除成功', removed.data?.ok === true && removed.data?.deleted === 1, JSON.stringify(removed.data));
 
   const gone = await request('GET', '/', { host: 'smoke-site.localhost' });
@@ -340,6 +361,9 @@ console.log('\n7. 删除项目');
 
   const list = await api('GET', '/api/projects', auth());
   check('列表中已移除', list.data?.projects?.some((p) => p.id === 'smoke-site') !== true);
+
+  const landing = await request('GET', '/', { host: 'localhost' });
+  check('入口页回到空状态', landing.body.toString().includes('还没有托管任何页面'));
 }
 
 console.log(`\n${failures.length ? '✖' : '✔'} 通过 ${passed} 项，失败 ${failures.length} 项`);

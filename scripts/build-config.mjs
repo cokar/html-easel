@@ -45,20 +45,18 @@ if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(rootDomain)) {
   process.exit(1);
 }
 
-// 两条路由：
-//   <域名>/*    根域名 -> 对外入口页（通配路由不匹配根域名本身，必须单独写一条）
-//   *.<域名>/*  后台 admin.<域名> + 所有 <项目>.<域名>
-// 都用 zone route，因此不会撞上「每个域名 100 个自定义域名」的上限。
+// 一条路由就够：*.<域名>/* 同时覆盖承载主机 www.<域名>（入口页 + /admin + /api）
+// 和所有 <项目>.<域名>。zone route 不占用「每个域名 100 个自定义域名」的配额。
 //
-// LANDING_AT_APEX=false 时不生成根域名那条：如果你的根域名上已经挂了别的东西，
-// 这条路由会把那个站点顶掉，此时把开关关掉，入口页改用 www 或别的子域名访问。
-const landingAtApex = config.vars?.LANDING_AT_APEX !== false;
+// ENABLE_APEX=true（默认 false）时额外生成 <域名>/* 一条：
+// 给以后想让裸域名也能访问的人留的门 —— 需要另加一条 @ 的 A 记录，
+// 访问时 302 到 www。默认不开，部署时就只需要一条通配 DNS 记录。
+const enableApex = config.vars?.ENABLE_APEX === true;
 
-config.routes = [];
-if (landingAtApex) {
-  config.routes.push({ pattern: `${rootDomain}/*`, zone_name: rootDomain });
+config.routes = [{ pattern: `*.${rootDomain}/*`, zone_name: rootDomain }];
+if (enableApex) {
+  config.routes.unshift({ pattern: `${rootDomain}/*`, zone_name: rootDomain });
 }
-config.routes.push({ pattern: `*.${rootDomain}/*`, zone_name: rootDomain });
 
 await writeFile(target, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 console.log(

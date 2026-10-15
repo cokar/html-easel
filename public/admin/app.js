@@ -259,7 +259,7 @@ async function selectFile(file) {
       if (file.size > MAX_ZIP_BYTES) {
         throw new Error(`压缩包 ${formatBytes(file.size)} 超过 250MB，请精简后重试`);
       }
-      state.worker = new Worker('/unzip-worker.js', { type: 'module' });
+      state.worker = new Worker('unzip-worker.js', { type: 'module' });
       state.plan = await analyzeWithWorker(state.worker, file);
     }
 

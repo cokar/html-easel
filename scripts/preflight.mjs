@@ -26,24 +26,17 @@ if (errors.length) {
 }
 
 const rootDomain = String(config.vars?.ROOT_DOMAIN || '').trim().replace(/^\*\./, '');
-const d1Id = String(config.d1_databases?.[0]?.database_id || '').trim();
 const bucket = String(config.r2_buckets?.[0]?.bucket_name || '').trim();
 
 if (!rootDomain || rootDomain === 'example.com') {
   problems.push(
     'vars.ROOT_DOMAIN 还是占位值 "example.com"。\n' +
       '     改成你自己的域名，例如 "mydomain.dev"。\n' +
-      '     两条路由会自动从它推导出来（"<域名>/*" 和 "*.<域名>/*"），不需要另外配。'
+      '     唯一的路由 *.<ROOT_DOMAIN>/* 会自动推导出来，不需要另外配。\n' +
+      '     （也可以直接跑 `npm run setup`，向导会帮你写好。）'
   );
 } else if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(rootDomain)) {
   problems.push(`vars.ROOT_DOMAIN = "${rootDomain}" 看起来不是一个域名。`);
-}
-
-if (!d1Id || d1Id.startsWith('REPLACE_WITH')) {
-  problems.push(
-    'd1_databases[0].database_id 还没填。\n' +
-      '     执行 `npx wrangler d1 create html-hosting`，把返回的 database_id 填进 wrangler.jsonc。'
-  );
 }
 
 if (!bucket) {
@@ -65,11 +58,11 @@ if (problems.length) {
 
 notes.forEach((n) => console.warn(`⚠ ${n}`));
 
-// 前端解压依赖这个文件（由 npm run vendor 生成）
+// 后台解压 Worker 依赖这个文件（由 npm run vendor 生成）
 try {
-  await readFile(resolve(root, 'public/vendor/fflate.js'));
+  await readFile(resolve(root, 'public/admin/vendor/fflate.js'));
 } catch {
-  console.error('✖ 缺少 public/vendor/fflate.js，请先执行：npm run vendor');
+  console.error('✖ 缺少 public/admin/vendor/fflate.js，请先执行：npm run vendor');
   process.exit(1);
 }
 

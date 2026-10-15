@@ -31,16 +31,15 @@ export function validateProjectId(id) {
 /**
  * 判断请求落在哪个位置。
  * 返回 { kind, projectId?, label? }，kind 取值：
- *   apex     根域名本身
- *   admin    后台子域名（ROOT_DOMAIN 里的 ADMIN_SUBDOMAIN）
+ *   apex     根域名本身（ENABLE_APEX 时才会有路由到达，302 到 www）
+ *   console  www.<域名>，承载入口页 + /admin 后台 + /api
  *   project  项目子域名
- *   www      www 子域名，做 302 跳转
- *   reserved 其他保留子域名
- *   local    localhost / 127.0.0.1，本地开发时当后台用
+ *   reserved 其他保留子域名（admin 已并入 /admin 路径，不再是子域名）
+ *   local    localhost / 127.0.0.1，本地开发时当承载主机用
  *   invalid  多级子域名之类无法处理的情况
- *   unknown  不属于 ROOT_DOMAIN 的主机（例如 *.workers.dev 预览域名），当后台用
+ *   unknown  不属于 ROOT_DOMAIN 的主机（例如 *.workers.dev 预览域名），当承载主机用
  */
-export function parseHost(hostname, rootDomain, adminSubdomain = 'admin') {
+export function parseHost(hostname, rootDomain) {
   const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
 
   if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') {
@@ -58,23 +57,40 @@ export function parseHost(hostname, rootDomain, adminSubdomain = 'admin') {
     // 通配 DNS 记录本身是多级的，但免费版 Universal SSL 只覆盖一层子域名，
     // 所以 a.b.example.com 走 HTTPS 会证书错误 —— 直接按无效主机处理。
     if (!label || label.includes('.')) return { kind: 'invalid' };
-    return labelHost(label, adminSubdomain);
+    return labelHost(label);
   }
 
   // 本地开发：Chrome 会把 *.localhost 解析到 127.0.0.1，用 myproj.localhost:8787 就能测项目分发。
   if (host.endsWith('.localhost')) {
     const label = host.slice(0, -'.localhost'.length);
-    if (label && !label.includes('.')) return labelHost(label, adminSubdomain);
+    if (label && !label.includes('.')) return labelHost(label);
   }
 
   return { kind: 'unknown' };
 }
 
-function labelHost(label, adminSubdomain) {
-  if (label === adminSubdomain) return { kind: 'admin' };
-  if (label === 'www') return { kind: 'www' };
+function labelHost(label) {
+  // www 是唯一的承载主机：入口页在 /，后台在 /admin，接口在 /api。
+  // 通配路由 *.<域名>/* 天然覆盖它，所以只需要一条路由和一条 DNS 记录。
+  if (label === 'www') return { kind: 'console' };
   if (RESERVED_SUBDOMAINS.has(label)) return { kind: 'reserved', label };
   return { kind: 'project', projectId: label };
+}
+
+/**
+ * 错误提示页上「前往管理后台」的链接。
+ * 承载主机（含本地开发）上用同源相对地址；项目子域名等其他主机上
+ * 用 www 的绝对地址 —— 项目自己的 /admin 路径属于项目内容，不能碰。
+ */
+export function adminUrlFor(request, env) {
+  const url = new URL(request.url);
+  const host = url.hostname.toLowerCase();
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host.endsWith('.localhost');
+  if (isLocal) {
+    const port = url.port ? `:${url.port}` : '';
+    return `${url.protocol}//localhost${port}/admin/`;
+  }
+  return `https://www.${String(env.ROOT_DOMAIN || '').toLowerCase()}/admin/`;
 }
 
 /**
